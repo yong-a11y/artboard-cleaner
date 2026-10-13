@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>Smart Artboard Cleaner</title>
+    <style>
+        :root { --primary: #ff7a59; --bg: #f3f2f1; --card: #ffffff; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); padding: 20px; display: flex; justify-content: center; }
+        .card { background: var(--card); width: 100%; max-width: 650px; padding: 30px; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,0.1); }
+        h2 { margin-top: 0; color: #333; border-left: 5px solid var(--primary); padding-left: 15px; margin-bottom: 25px; }
+        .section { background: #f9f9f9; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #eee; }
+        label { display: block; margin-bottom: 8px; font-weight: bold; color: #555; font-size: 14px; }
+        textarea { width: 100%; padding: 12px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; font-size: 14px; background: white; resize: vertical; }
+        button { background: var(--primary); color: white; border: none; padding: 15px; border-radius: 6px; cursor: pointer; font-weight: bold; width: 100%; font-size: 16px; margin-top: 10px; transition: background 0.2s; }
+        button:hover { background: #e0684a; }
+        .hint { font-size: 12px; color: #888; margin-top: 5px; line-height: 1.6; }
+        #preview { font-size: 13px; color: #444; margin-top: 10px; word-break: break-all; }
+        #result-msg { text-align: center; color: #28a745; font-weight: bold; margin-top: 15px; display: none; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>✨ 아트보드 자동정리 스크립트 생성기</h2>
+
+        <div class="section">
+            <label>1. 주문 모델 리스트 입력</label>
+            <textarea id="rawInput" rows="8" oninput="updatePreview()" placeholder="EG-001 또는 XEG-001_STA_15 형식 모두 가능 (섞어서 붙여넣어도 됩니다)"></textarea>
+            <p class="hint">
+                💡 고객용 코드(EG-001)와 공장용 코드(XEG-001_STA_15)를 모두 인식합니다.<br>
+                앞의 X와 뒤의 _STA_버전은 자동으로 떼고 EG-001 형태로 비교합니다. 대소문자는 상관없습니다.
+            </p>
+            <div id="preview"></div>
+        </div>
+
+        <button onclick="generateAndDownload()">🚀 자동 삭제 파일(.jsx) 다운로드</button>
+
+        <div id="result-msg"></div>
+    </div>
+
+    <script>
+        // XEG-001_STA_15 / xeg-001 / EG-001 / eg-1  →  "EG-001" (표시용) 으로 통일
+        function normalize(code) {
+            var m = String(code).toUpperCase().match(/([A-Z]+)-(\d+)/);
+            if (!m) return null;
+            var prefix = m[1];
+            if (prefix.length > 1 && prefix.charAt(0) === 'X') prefix = prefix.substring(1); // XEG → EG
+            return prefix + '-' + m[2];
+        }
+
+        function extractModels(rawText) {
+            var found = rawText.match(/[a-zA-Z]+-\d+/g) || [];
+            var result = [];
+            var seen = {};
+            for (var i = 0; i < found.length; i++) {
+                var n = normalize(found[i]);
+                if (!n) continue;
+                // 비교 키: 숫자 앞자리 0 무시 (EG-1 = EG-001)
+                var key = n.split('-')[0] + '-' + parseInt(n.split('-')[1], 10);
+                if (seen[key]) continue;
+                seen[key] = true;
+                result.push(n);
+            }
+            return result;
+        }
+
+        function updatePreview() {
+            var models = extractModels(document.getElementById('rawInput').value);
+            document.getElementById('preview').innerText = models.length
+                ? '인식된 모델 ' + models.length + '개: ' + models.join(', ')
+                : '';
+        }
+
+        function generateAndDownload() {
+            var models = extractModels(document.getElementById('rawInput').value);
+
+            if (models.length === 0) {
+                alert("입력된 텍스트에서 모델 번호를 찾을 수 없습니다.\n'EG-001' 또는 'XEG-001_STA_15' 형태가 포함되어 있는지 확인해주세요.");
+                return;
+            }
+
+            var modelArrayString = JSON.stringify(models);
+
+            // 일러스트레이터용 JSX 스크립트 생성 (ExtendScript = 구버전 JS 문법)
+            var jsxCode = `
+#target illustrator
+
+function toKey(name) {
+    var m = String(name).toUpperCase().match(/([A-Z]+)-(\\d+)/);
+    if (!m) return null;
+    var prefix = m[1];
+    if (prefix.length > 1 && prefix.charAt(0) === 'X') prefix = prefix.substring(1);
+    return prefix + '-' + parseInt(m[2], 10);
+}
+
+function keepOrderedArtboards() {
+    if (app.documents.length === 0) {
+        alert("열려있는 일러스트레이터 문서가 없습니다.");
+        return;
+    }
+
+    var doc = app.activeDocument;
+
+    // 웹 툴에서 자동으로 생성된 모델 리스트 (EG-001 형태로 통일됨)
+    var orderedModels = ${modelArrayString};
+
+    var keepKeys = {};
+    for (var j = 0; j < orderedModels.length; j++) {
+        keepKeys[toKey(orderedModels[j])] = orderedModels[j];
+    }
+
+    var boardsToDelete = [];
+    var matchedKeys = {};
+
+    for (var i = 0; i < doc.artboards.length; i++) {
+        var key = toKey(doc.artboards[i].name);
+        if (key !== null && keepKeys.hasOwnProperty(key)) {
+            matchedKeys[key] = true;
+        } else {
+            boardsToDelete.push(i);
+        }
+    }
+
+    // 파일에 없는 코드 목록
+    var missing = [];
+    for (var k in keepKeys) {
+        if (keepKeys.hasOwnProperty(k) && !matchedKeys[k]) missing.push(keepKeys[k]);
+    }
+    var missingMsg = missing.length ? "\\n\\n⚠️ 파일에 없는 코드 " + missing.length + "개:\\n" + missing.join(", ") : "";
+
+    if (boardsToDelete.length === doc.artboards.length) {
+        alert("경고: 리스트와 일치하는 아트보드가 하나도 없습니다." + missingMsg);
+        return;
+    }
+
+    var keepCount = doc.artboards.length - boardsToDelete.length;
+    var ok = confirm("남길 아트보드: " + keepCount + "개\\n삭제할 아트보드: " + boardsToDelete.length + "개" + missingMsg + "\\n\\n진행할까요?");
+    if (!ok) return;
+
+    for (var d = boardsToDelete.length - 1; d >= 0; d--) {
+        var deleteIndex = boardsToDelete[d];
+        doc.artboards.setActiveArtboardIndex(deleteIndex);
+        doc.selectObjectsOnActiveArtboard();
+        app.executeMenuCommand('clear');
+        doc.artboards[deleteIndex].remove();
+    }
+
+    alert("✨ 완료! 아트보드 " + keepCount + "개를 남기고 " + boardsToDelete.length + "개를 삭제했습니다." + missingMsg);
+}
+
+keepOrderedArtboards();
+`;
+
+            // 파일 다운로드 트리거
+            var blob = new Blob([jsxCode], { type: 'text/plain' });
+            var url = URL.createObjectURL(blob);
+            var link = document.createElement('a');
+            link.href = url;
+            link.download = '아트보드_자동정리.jsx';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+
+            var resultMsg = document.getElementById('result-msg');
+            resultMsg.style.display = 'block';
+            resultMsg.innerText = "✅ " + models.length + "개의 모델이 인식되었습니다. 다운로드된 파일을 실행하세요!";
+        }
+    </script>
+</body>
+</html>
